@@ -4865,6 +4865,20 @@ void OSD::ms_fast_dispatch(Message *m)
   service.release_map(nextmap);
 }
 
+void OSD::ms_fast_preprocess(Message *m)
+{
+  if (m->get_connection()->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
+    if (m->get_type() == CEPH_MSG_OSD_MAP) {
+      MOSDMap *mm = static_cast<MOSDMap*>(m);
+      Session *s = static_cast<Session*>(m->get_connection()->get_priv());
+      s->received_map_lock.Lock();
+      s->received_map_epoch = mm->get_last();
+      s->received_map_lock.Unlock();
+      s->put();
+    }
+  }
+}
+
 bool OSD::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new)
 {
   dout(10) << "OSD::ms_get_authorizer type=" << ceph_entity_type_name(dest_type) << dendl;
