@@ -193,17 +193,8 @@ void Pipe::DelayedDelivery::flush()
 {
   lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::flush" << dendl;
   Mutex::Locker l(delay_lock);
-  while (!delay_queue.empty()) {
-    Message *m = delay_queue.front().second;
-    delay_queue.pop_front();
-    if (pipe->in_q->can_fast_dispatch(m)) {
-      delay_lock.Unlock();
-      pipe->in_q->fast_dispatch(m);
-      delay_lock.Lock();
-    } else {
-      pipe->in_q->enqueue(m, m->get_priority(), pipe->conn_id);
-    }
-  }
+  flush_count = delay_queue.size();
+  delay_cond.Signal();
 }
 
 void *Pipe::DelayedDelivery::entry()
@@ -220,8 +211,9 @@ void *Pipe::DelayedDelivery::entry()
     utime_t release = delay_queue.front().first;
     Message *m = delay_queue.front().second;
     string delay_msg_type = pipe->msgr->cct->_conf->ms_inject_delay_msg_type;
-    if (release > ceph_clock_now(pipe->msgr->cct) &&
-	(delay_msg_type.empty() || m->get_type_name() == delay_msg_type)) {
+    if (!flush_count ||
+        (release > ceph_clock_now(pipe->msgr->cct) &&
+         (delay_msg_type.empty() || m->get_type_name() == delay_msg_type))) {
       lgeneric_subdout(pipe->msgr->cct, ms, 10) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry sleeping on delay_cond until " << release << dendl;
       delay_cond.WaitUntil(delay_lock, release);
       continue;
@@ -235,6 +227,8 @@ void *Pipe::DelayedDelivery::entry()
     } else {
       pipe->in_q->enqueue(m, m->get_priority(), pipe->conn_id);
     }
+    if (flush_count > 0)
+      --flush_count;
   }
   lgeneric_subdout(pipe->msgr->cct, ms, 20) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry stop" << dendl;
   return NULL;
@@ -627,8 +621,12 @@ int Pipe::accept()
     connection_state->reset_pipe(this);
 
     // flush/queue any existing delayed messages
-    if (existing->delay_thread)
-      existing->delay_thread->flush();
+    if (existing->delay_thread) {
+      maybe_start_delay_thread();
+      assert(delay_thread); // prior incarnation got one, so do we
+      delay_thread->steal_queue(existing->delay_thread);
+      delay_thread->flush();
+    }
 
     // steal incoming queue
     uint64_t replaced_conn_id = conn_id;
@@ -1756,6 +1754,9 @@ void Pipe::unlock_maybe_reap()
   if (!reader_running && !writer_running) {
     shutdown_socket();
     pipe_lock.Unlock();
+    if (delay_thread && delay_thread->is_flushing()) {
+      delay_thread->wait_for_flush();
+    }
     msgr->queue_reap(this);
   } else {
     pipe_lock.Unlock();
