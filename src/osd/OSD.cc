@@ -4635,7 +4635,7 @@ bool OSDService::should_share_map(entity_name_t name, Connection *con,
       (osdmap->get_cluster_addr(name.num()) == con->get_peer_addr() ||
        osdmap->get_hb_back_addr(name.num()) == con->get_peer_addr())) {
     // remember
-    epoch_t has = osd->get_peer_epoch(name.num());
+    epoch_t has = MIN(osd->get_peer_epoch(name.num()), epoch);
 
     // share?
     if (has < osdmap->get_epoch()) {
